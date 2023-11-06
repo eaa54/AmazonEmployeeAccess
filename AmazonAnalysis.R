@@ -195,6 +195,85 @@ amazon_nb <- pred_nb %>%
 
 vroom_write(amazon_nb, file="amazon_preds_nb.csv", delim=",")
 
+#######
+##KNN##
+#######
+
+# knn model
+knn_model <- nearest_neighbor(neighbors=50) %>% #can set or tune
+  set_mode("classification") %>%
+  set_engine("kknn")
+
+knn_wf <- workflow() %>%
+  add_recipe(Amazon_recipe_PCR) %>% #use other recipe for KNN alone
+  add_model(knn_model) %>%
+  fit(amazon)
+
+knn_preds <- predict(knn_wf, new_data=testData, type="prob")
+
+amazon_knn <- knn_preds %>%
+  mutate(ACTION = .pred_1, id = row_number()) %>%
+  select(-.pred_0, -.pred_1) %>%
+  relocate(id, .before = ACTION)
+
+vroom_write(amazon_knn, file="amazon_preds_knn.csv", delim=",")
+
+###########################################
+##PRINCIPLE COMPONENT DIMENSION REDUCTION##
+###########################################
+
+Amazon_recipe_PCR <- recipe(ACTION ~ ., amazon) %>%
+  step_mutate_at(all_numeric_predictors(), fn = factor) %>%
+  step_normalize(all_numeric_predictors()) %>%
+  step_other(all_nominal_predictors(), threshold = 0.0000001) %>% #takes predictor columns and makes an other col for values that occur less than 1% of the time
+  step_lencode_mixed(all_nominal_predictors(), outcome = vars(ACTION)) %>% #target encoding
+  step_pca(all_predictors(), threshold = 0.9)
+
+# re-run naive bayes with principle component reduction
+# nb model
+nb_model <- naive_Bayes(Laplace=tune(), smoothness=tune()) %>%
+  set_mode("classification") %>%
+  set_engine("naivebayes") #need discrim library for this engine
+
+# set workflow
+nb_wf <- workflow() %>%
+  add_recipe(Amazon_recipe_PCR) %>%
+  add_model(nb_model)
+
+# tune smoothness and Laplace here
+# Set up tuning values
+nb_grid <- grid_regular(Laplace(),
+                        smoothness(),
+                        levels = 5)
+
+# Set up k-fold cross validation and run it
+nb_folds <- vfold_cv(amazon, v = 5, repeats = 1)
+
+CV_nb_results <- nb_wf %>%
+  tune_grid(resamples = nb_folds,
+            grid = nb_grid,
+            metrics = metric_set(roc_auc)) #area under ROC curve (false positives vs. true positives)
+
+# Find Best Tuning Parameters
+bestTune_nb <- CV_nb_results %>%
+  select_best("roc_auc")
+
+# finalize workflow and fit it
+final_nb_wf <- nb_wf %>%
+  finalize_workflow(bestTune_nb) %>%
+  fit(data = amazon)
+
+pred_nb <- final_nb_wf %>%
+  predict(new_data = testData, type = "prob")
+
+# format for Kaggle
+amazon_nb <- pred_nb %>%
+  mutate(ACTION = .pred_1, id = row_number()) %>%
+  select(-.pred_0, -.pred_1) %>%
+  relocate(id, .before = ACTION)
+
+vroom_write(amazon_nb, file="amazon_preds_nb.csv", delim=",")
+
 ##NOTES ON RUNNING JOBS ON THE SERVER##
 #save R objects
 #save("filename.Rdata", list=c("amazon_wf"))
